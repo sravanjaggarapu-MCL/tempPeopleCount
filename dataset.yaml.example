@@ -1,4 +1,4 @@
-# dataset.yaml.example - mobile-in-frame detection project
+# dataset.yaml.example - head detection project
 # Author: Sathish (sathish.c@magellanic-cloud.com) — Magellanic Cloud, TrainX
 #
 # REFERENCE ONLY. Do NOT ship a live dataset.yaml:
@@ -8,24 +8,35 @@
 #
 # train: /trainx/workspaces/<project>/<dataset_id>/train_split.txt   # newline-delimited absolute image paths
 # val:   /trainx/workspaces/<project>/<dataset_id>/val_split.txt
-# nc: 2                                  # regenerated from CVAT labels EVERY run
-# names: ["person", "mobile"]            # never hardcode a class list in the repo
+# nc: 1                                  # regenerated from CVAT labels EVERY run
+# names: ["head"]                        # never hardcode a class list in the repo
 #
-# THE ORDER OF `names` IS NOT OURS TO CHOOSE. It comes from the project's CVAT
-# label list, so class id 0/1 is whatever CVAT says. Nothing in this repo may
-# assume "mobile is id 1":
-#   * train.py reads nc/names from this file only to REPORT them (preflight)
+# THE ORDER AND SPELLING OF `names` ARE NOT OURS TO CHOOSE. They come from the
+# project's CVAT label list, so class id 0 is whatever CVAT says, and the
+# label may be 'head', 'Head', 'person_head' or anything else the annotation
+# team agreed on. Nothing in this repo may assume "head is id 0":
+#   * train.py reads nc/names from this file to REPORT them (preflight) and to
+#     recognize WHICH label is the head class - never to assume an id
 #   * export.py copies them into model_package.json in that same id order
-#   * deploy/edge_client.py resolves 'mobile' BY NAME through that list
+#   * deploy/edge_client.py resolves 'head' BY NAME through that list
 # Reorder or rename the labels in CVAT and the whole chain still works.
+#
+# A second class is fine too (e.g. names: ["head", "person"]) - the pipeline
+# regenerates nc/names and the preflight reports both. The head-specific
+# checks simply apply to whichever label is recognized as the head class.
 #
 # Labels resolve the standard YOLOv5 way: each image path's images/ segment is
 # replaced by labels/ and .txt appended (one YOLO-format line per box), e.g.
 #   .../versions/<id>/images/frame_00042.jpg
 #   .../versions/<id>/labels/frame_00042.txt
-#     0 0.512 0.604 0.180 0.712     <- person
-#     1 0.556 0.489 0.031 0.058     <- mobile (note how SMALL a phone box is)
+#     0 0.512 0.184 0.041 0.052     <- head (note how SMALL a head box is:
+#     0 0.333 0.201 0.038 0.047        ~4-5% of frame height is typical, which
+#     0 0.774 0.167 0.029 0.036        is why --img 640 is the floor here)
 #
-# A frame with a person but no visible phone still gets a label file - just
-# the person line. A frame with neither is a legitimate background image and
-# gets an EMPTY .txt (not a missing one).
+# Annotate EVERY head in the frame, including the small ones at the back. A
+# half-annotated crowd teaches the model that distant heads are background -
+# precisely the recall this project needs most.
+#
+# A frame with no people at all is a legitimate background image and gets an
+# EMPTY .txt (not a missing one). Those are worth having: headrests, posters
+# of faces, mannequins and lamps are what a head detector false-positives on.

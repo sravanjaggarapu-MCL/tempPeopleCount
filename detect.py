@@ -1,5 +1,5 @@
 """
-detect.py - inference entry point for the MOBILE-IN-FRAME detection project.
+detect.py - inference entry point for the HEAD DETECTION project.
 
 WHY THIS FILE EXISTS: the post-training evaluation stage runs
 eval_visual_sample.py, which looks for detect.py at the repo root and renders
@@ -10,8 +10,9 @@ run's metrics. Without it the stage logs, non-fatally:
     sample): detect.py not found at '<repo>/detect.py'
 
 and the run has numbers but no picture - which for a small-object project
-like this one is exactly the artifact you want, because a phone that the
-model misses or hallucinates is far easier to SEE than to read off an mAP.
+like this one is exactly the artifact you want, because heads the model
+missed in the back of a crowd, or boxes it hallucinated on shoulders and
+headrests, are far easier to SEE than to read off an mAP.
 
 Same architecture dispatch as train.py/export.py: the family comes from the
 checkpoint itself ('models.yolo' -> yolov5, 'ultralytics.nn' -> ultralytics),
@@ -28,7 +29,7 @@ ignored on the ultralytics path, so a change to the eval stage's argv cannot
 break this file.
 """
 # Author: Sathish (sathish.c@magellanic-cloud.com) - Magellanic Cloud, TrainX
-# Customized for the mobile-in-frame detection project (labels: person, mobile).
+# Customized for the HEAD DETECTION project (person's head; CVAT label 'head').
 import argparse
 import os
 import sys

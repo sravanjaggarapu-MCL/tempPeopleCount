@@ -1,6 +1,6 @@
 """
-export.py - TrainX export entry point for the MOBILE-IN-FRAME detection
-project (2 CVAT labels: person, mobile).
+export.py - TrainX export entry point for the HEAD DETECTION project
+(detects a person's head; the CVAT label is normally a single 'head' class).
 
 The post-training export/quantize stage (export_and_quantize.sh Step 2) runs,
 verbatim:
@@ -34,13 +34,18 @@ TWO PROJECT-SPECIFIC ADDITIONS on the ultralytics path:
     up even though the load-bearing best.onnx had already been written.
   * a model_package.json is written next to the weights when one is not
     already there, carrying img_size + the class names read from --data. That
-    is the file deploy/edge_client.py reads to map class id -> "mobile", so a
+    is the file deploy/edge_client.py reads to map class id -> "head", so a
     locally exported model can be shipped to a device without hand-writing it.
     The platform's own Artifacts-panel model_package.json is authoritative -
     this one only fills the gap and never overwrites.
+
+  * img_size is recorded in that manifest, and for a head detector it is
+    load-bearing: the edge client letterboxes to exactly this size, and an
+    ONNX exported at 320 cannot be run at 640 later to recover the small-head
+    recall. Export at the size the model was TRAINED at.
 """
 # Author: Sathish (sathish.c@magellanic-cloud.com) - Magellanic Cloud, TrainX
-# Customized for the mobile-in-frame detection project (labels: person, mobile).
+# Customized for the HEAD DETECTION project (person's head; CVAT label 'head').
 import argparse
 import json
 import os
@@ -153,8 +158,8 @@ def export_yolov5_delegate(argv):
 def class_names_from_data(data_yaml):
     """The class list for the deployment manifest, read from the GENERATED
     dataset yaml - i.e. straight from CVAT, in the id order the model was
-    trained with. Never hardcode ['person', 'mobile'] here: the ORDER is
-    whatever the project's CVAT label list says, and the edge client maps
+    trained with. Never hardcode ['head'] here: the ORDER (and the spelling)
+    is whatever the project's CVAT label list says, and the edge client maps
     id -> name through exactly this list."""
     if not data_yaml or not os.path.isfile(data_yaml):
         return []

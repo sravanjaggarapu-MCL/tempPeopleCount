@@ -1,6 +1,6 @@
 """
-train.py - TrainX training entry point for the MOBILE-IN-FRAME detection
-project (2 CVAT labels: person, mobile).
+train.py - TrainX training entry point for the HEAD DETECTION project
+(detects a person's head; the CVAT label is normally a single 'head' class).
 
 CONTRACT FIRST: this file keeps the orchestrator's argv and output contract
 byte-for-byte. It accepts exactly the flags run_training.sh Step 3 passes and
@@ -27,13 +27,17 @@ on the family of --weights:
 PROJECT-SPECIFIC PART - the dataset preflight (see preflight_dataset below).
 Before a single epoch runs it parses the generated --data yaml and prints
 what the run is ACTUALLY about to train on: nc/names straight from CVAT, the
-image count per split, and a per-class box tally over the train split. It
-warns - never fails - on the three things that quietly ruin a two-class
-person/mobile run:
+image count per split, a per-class box tally over the train split, and the
+MEDIAN BOX HEIGHT of each class in pixels at the requested --img. It warns -
+never fails - on the things that quietly ruin a head-detection run:
 
-  * 'mobile' present in names but with ZERO boxes in the train split (the
-    CVAT label exists but nobody drew the small boxes yet - the run will
-    happily finish with mAP that looks fine because 'person' carries it)
+  * no label in the CVAT list looks like a head class at all (the project is
+    pointed at the wrong CVAT label list)
+  * the head class present in names but with ZERO boxes in the train split
+    (the label exists but nobody drew the boxes yet)
+  * median head box smaller than ~16 px at the chosen --img - a head is a
+    SMALL object, and this is the number that decides whether the run can
+    work at all; raising Image size is the fix, not epochs
   * label .txt files missing for images (the images/ -> labels/ rewrite did
     not resolve, so those images silently train as backgrounds)
   * a class id in the labels that is >= nc (the annotations and the CVAT
@@ -67,7 +71,7 @@ Exit 0 on success. MLflow logging is done FOR you afterwards
 (log_run_to_mlflow.py) - do not add your own.
 """
 # Author: Sathish (sathish.c@magellanic-cloud.com) - Magellanic Cloud, TrainX
-# Customized for the mobile-in-frame detection project (labels: person, mobile).
+# Customized for the HEAD DETECTION project (person's head; CVAT label 'head').
 import argparse
 import csv
 import os
@@ -101,8 +105,8 @@ GATE_COLUMNS = ("metrics/precision", "metrics/recall",
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff")
 
 # Scanning every label file of a large dataset is pointless - a few thousand
-# are more than enough to tell "the mobile class has no boxes" from "the
-# mobile class is just rarer than person".
+# are more than enough to tell "the head class has no boxes" from "the head
+# class is just thinner than expected", and to get a stable median box size.
 LABEL_SCAN_LIMIT = 10000
 
 # A detector needs boxes, not images. An autolabel export can easily be 1000
@@ -111,6 +115,22 @@ LABEL_SCAN_LIMIT = 10000
 # thresholds are what turn that into a warning instead of a wasted run.
 LOW_INSTANCE_WARN = 200      # boxes per class below which the class is too thin
 HIGH_BACKGROUND_WARN = 0.60  # fraction of label-less images that is suspicious
+
+# A head is a SMALL object. Below roughly this many pixels of box height at
+# the training --img, a YOLO detector has almost nothing left to learn from
+# after the stride-8/16/32 downsampling, and recall collapses no matter how
+# many epochs are spent. Advisory only - it is a loud hint to raise Image
+# size (or to annotate closer cameras), never a reason to refuse a run.
+MIN_BOX_PIXELS_WARN = 16
+
+# Label spellings that mean "a person's head" in CVAT. Matching is
+# case-insensitive and ignores spaces/underscores/hyphens, so 'Head',
+# 'person_head' and 'human-head' all resolve. This list is used ONLY to
+# recognize the class in the yaml for reporting/warnings - the class ID
+# itself always comes from the generated yaml, never from this tuple.
+HEAD_LABEL_ALIASES = ("head", "personhead", "humanhead", "peoplehead",
+                      "headperson", "headcount", "face", "personface",
+                      "humanface")
 
 
 def parse_args():
@@ -153,6 +173,22 @@ def fail(msg):
 # --------------------------------------------------------------------------
 # Dataset preflight - project-specific, advisory only
 # --------------------------------------------------------------------------
+
+def canonical_label(name):
+    """Fold a CVAT label to a comparable form: lowercase, no spaces, no
+    separators. 'Person Head' / 'person_head' / 'PERSON-HEAD' -> 'personhead'."""
+    return "".join(str(name).lower().split()).replace("_", "").replace("-", "")
+
+
+def is_head_label(name):
+    """Does this CVAT label denote a person's head? Alias match first, then a
+    substring sweep so an unexpected spelling such as 'head-top-view' or
+    'head_small' is still recognized instead of silently going unreported."""
+    n = canonical_label(name)
+    if n in HEAD_LABEL_ALIASES:
+        return True
+    return "head" in n
+
 
 def normalize_names(raw, nc):
     """CVAT-generated yamls carry names as a list; ultralytics also accepts a
@@ -208,11 +244,17 @@ def label_path_for(image_path):
 
 
 def scan_labels(images, nc):
-    """Tally boxes per class id over (a sample of) a split's label files.
+    """Tally boxes per class id over (a sample of) a split's label files, and
+    collect each box's NORMALIZED HEIGHT.
 
-    Returns (counts, stats). counts maps class id -> box count, including ids
-    >= nc, which is exactly the out-of-sync case worth shouting about."""
-    counts, stats = {}, {"scanned": 0, "missing": 0, "empty": 0, "malformed": 0}
+    Returns (counts, heights, stats). counts maps class id -> box count,
+    including ids >= nc, which is exactly the out-of-sync case worth shouting
+    about. heights maps class id -> list of box heights as a fraction of the
+    frame height; for a head detector that distribution is what decides
+    whether --img is large enough, so it is worth the extra two floats per
+    line."""
+    counts, heights = {}, {}
+    stats = {"scanned": 0, "missing": 0, "empty": 0, "malformed": 0}
     for img in images[:LABEL_SCAN_LIMIT]:
         lbl = label_path_for(img)
         if not os.path.isfile(lbl):
@@ -233,12 +275,21 @@ def scan_labels(images, nc):
                         continue
                     counts[cid] = counts.get(cid, 0) + 1
                     boxes += 1
+                    # YOLO line: <cid> <xc> <yc> <w> <h>, all normalized.
+                    # A missing/garbled geometry is not worth a malformed
+                    # count of its own - the class tally above is the thing
+                    # the gate cares about - so it is simply not measured.
+                    if len(parts) >= 5:
+                        try:
+                            heights.setdefault(cid, []).append(float(parts[4]))
+                        except ValueError:
+                            pass
         except OSError:
             stats["malformed"] += 1
             continue
         if boxes == 0:
             stats["empty"] += 1
-    return counts, stats
+    return counts, heights, stats
 
 
 def format_tally(counts, names, nc):
@@ -252,10 +303,14 @@ def format_tally(counts, names, nc):
     return "  ".join(parts)
 
 
-def preflight_dataset(data_yaml):
+def preflight_dataset(data_yaml, img_size):
     """Print - and sanity-check - the dataset this run was handed. Advisory
     only: every problem is a warning, never an exit code, because the yaml is
-    generated by the pipeline and a false positive here must not block a run."""
+    generated by the pipeline and a false positive here must not block a run.
+
+    img_size is the run's --img: box sizes are reported in pixels AT THAT
+    SIZE, because '3% of frame height' means nothing on its own and '9 px at
+    --img 320' tells the reader exactly what to change."""
     if os.environ.get("TRAINX_SKIP_PREFLIGHT"):
         log("dataset preflight skipped (TRAINX_SKIP_PREFLIGHT is set)")
         return
@@ -281,10 +336,16 @@ def preflight_dataset(data_yaml):
     if not isinstance(nc, int):
         nc = len(names)
     log(f"classes   : nc={nc} names={names}")
-    if nc != 2:
-        warn(f"this project is annotated with TWO CVAT labels (person, mobile) "
-             f"but the generated yaml says nc={nc}. Check the project's label "
-             f"list in CVAT - nc/names are regenerated from it every run.")
+    head_ids = [i for i, n in enumerate(names[:nc]) if is_head_label(n)]
+    if head_ids:
+        log("head class: "
+            + ", ".join(f"id {i} = {names[i]!r}" for i in head_ids))
+    else:
+        warn(f"none of the CVAT labels {names} looks like a head class, but "
+             f"this project trains a HEAD detector. Check the project's label "
+             f"list in CVAT - nc/names are regenerated from it on every run "
+             f"and nothing in this repo hardcodes them. Training continues; "
+             f"the head-specific checks below are skipped.")
 
     # 'path:' is optional in YOLO yamls; relative train:/val: resolve against it.
     base_dir = str(cfg.get("path") or os.path.dirname(os.path.abspath(data_yaml)))
@@ -327,13 +388,60 @@ def preflight_dataset(data_yaml):
         log("------------------------------------------------------------------")
         return
 
-    counts, stats = scan_labels(train_images, nc)
+    counts, heights, stats = scan_labels(train_images, nc)
     sampled = min(len(train_images), LABEL_SCAN_LIMIT)
     suffix = (f" (sample of {sampled}/{len(train_images)})"
               if sampled < len(train_images) else "")
     log(f"box tally : {format_tally(counts, names, nc)}{suffix}")
     log(f"label files: {stats['scanned']} read, {stats['missing']} missing, "
         f"{stats['empty']} empty (background), {stats['malformed']} malformed")
+
+    # ---- how big is a head in this dataset? ------------------------------
+    # The single most useful number for THIS project. A head is the smallest
+    # thing the model will ever be asked to find, and "3% of frame height"
+    # means nothing until it is expressed in pixels at the --img this run
+    # will actually train at. Printing it turns "use 640" from folklore into
+    # a decision the reader can make from their own data.
+    for cid in sorted(set(range(nc)) & set(heights)):
+        hs = sorted(heights[cid])
+        if not hs:
+            continue
+        cname = names[cid] if cid < len(names) else "<class %d>" % cid
+        median = hs[len(hs) // 2]
+        decile = hs[int(0.10 * (len(hs) - 1))]
+        log(f"box size  : '{cname}' median height {100 * median:.1f}% of frame "
+            f"= {median * img_size:.0f}px at --img {img_size}  "
+            f"(smallest decile {decile * img_size:.0f}px)")
+        if not is_head_label(cname) or median <= 0:
+            continue
+        if median * img_size < MIN_BOX_PIXELS_WARN:
+            # Round the suggestion up to a multiple of 32 - YOLO strides are
+            # 8/16/32, so any other value is silently padded anyway - and
+            # never suggest less than 640, this project's baseline: clearing
+            # the 16px floor exactly is not a target worth aiming at.
+            need = max(640, int(((MIN_BOX_PIXELS_WARN / median) + 31) // 32) * 32)
+            warn(f"the median '{cname}' box is only {median * img_size:.0f}px "
+                 f"tall at --img {img_size}. After the stride-8/16/32 "
+                 f"downsampling there is almost nothing left of it, and recall "
+                 f"will stay low however many epochs are spent. Raise the "
+                 f"wizard's Image size to about {need} (or annotate from "
+                 f"closer cameras) - that is by far the biggest lever on this "
+                 f"project, well ahead of epochs, batch size or model size.")
+
+    # Crowd density. For head detection the heads-per-image figure is what
+    # tells a sparse office camera apart from a packed platform view, and it
+    # is what decides whether the default max-detections cap can bite.
+    if head_ids and stats["scanned"]:
+        head_boxes = sum(counts.get(i, 0) for i in head_ids)
+        per_image = head_boxes / stats["scanned"]
+        log(f"density   : {per_image:.1f} head(s) per annotated train image")
+        if per_image > 50:
+            warn(f"{per_image:.0f} heads per image is a dense crowd. Both "
+                 f"YOLO families cap detections per image (max_det, default "
+                 f"300) and NMS at a 0.45 IoU will merge touching heads in a "
+                 f"packed frame - expect counts to saturate. Prefer a larger "
+                 f"Image size, and validate the counts on a held-out dense "
+                 f"clip rather than trusting mAP alone.")
 
     if stats["missing"]:
         warn(f"{stats['missing']} image(s) in the train split have NO label .txt "
@@ -369,10 +477,15 @@ def preflight_dataset(data_yaml):
     for cid in range(nc):
         if counts.get(cid, 0) == 0:
             cname = names[cid] if cid < len(names) else "<class %d>" % cid
-            warn(f"class '{cname}' (id {cid}) has ZERO boxes in the train split. "
-                 f"The run will still finish and report mAP, but the model can "
-                 f"never detect it. For this project that usually means the "
-                 f"'mobile' boxes have not been drawn/approved in CVAT yet.")
+            extra = ("This is THE head class of this project - the run would "
+                     "produce a model that can never detect a head. Draw and "
+                     "approve the head boxes in CVAT, promote a new dataset "
+                     "version, and rerun."
+                     if is_head_label(cname) else
+                     "The run will still finish and report mAP, but the model "
+                     "can never detect it.")
+            warn(f"class '{cname}' (id {cid}) has ZERO boxes in the train "
+                 f"split. {extra}")
     stray = sorted(c for c in counts if c >= nc)
     if stray:
         warn(f"label files contain class id(s) {stray} but nc={nc}. The "
@@ -560,13 +673,15 @@ def main():
     log(f"img={args.img} batch={args.batch} epochs={args.epochs} seed={args.seed}")
     log(f"run dir   : {os.path.join(args.project, args.name)}")
     if args.img < 640:
-        warn(f"--img {args.img}: a mobile phone is a SMALL object, often under "
-             f"5% of the frame height. 640 detects phones far more reliably "
-             f"than 320 - raise 'Image size' in the wizard unless the edge "
-             f"device cannot afford it.")
+        warn(f"--img {args.img}: a human head is a SMALL object - in a typical "
+             f"room, corridor or entrance view it is 3-8% of the frame height, "
+             f"i.e. 10-25px at 320 and barely resolvable. 640 detects heads far "
+             f"more reliably - raise 'Image size' in the wizard unless the edge "
+             f"device cannot afford it. The preflight below prints the real "
+             f"median head size of THIS dataset in pixels at the chosen size.")
     # Advisory - runs for BOTH families, and before the yolov5 delegate's
     # execv replaces this process.
-    preflight_dataset(args.data)
+    preflight_dataset(args.data, args.img)
     if family == "yolov5":
         return train_yolov5_delegate(sys.argv[1:])
     if family == "ultralytics":

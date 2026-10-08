@@ -22,7 +22,8 @@
 # ultralytics>=8.0
 #
 # --- edge deployment (deploy/edge_client.py, NOT the training host) ---------
-# Installed on the Raspberry Pi / store PC / NUC, never on the trainer:
+# Installed on the Raspberry Pi / store PC / NUC that runs the head-count
+# client, never on the trainer:
 # onnxruntime
 # opencv-python
 # numpy
