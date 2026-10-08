@@ -1,0 +1,31 @@
+# dataset.yaml.example - mobile-in-frame detection project
+# Author: Sathish (sathish.c@magellanic-cloud.com) — Magellanic Cloud, TrainX
+#
+# REFERENCE ONLY. Do NOT ship a live dataset.yaml:
+# the pipeline GENERATES the real one per run at
+#   /trainx/workspaces/<project>/<dataset_id>/dataset.yaml
+# and passes it to train.py via --data. For this project it looks like this:
+#
+# train: /trainx/workspaces/<project>/<dataset_id>/train_split.txt   # newline-delimited absolute image paths
+# val:   /trainx/workspaces/<project>/<dataset_id>/val_split.txt
+# nc: 2                                  # regenerated from CVAT labels EVERY run
+# names: ["person", "mobile"]            # never hardcode a class list in the repo
+#
+# THE ORDER OF `names` IS NOT OURS TO CHOOSE. It comes from the project's CVAT
+# label list, so class id 0/1 is whatever CVAT says. Nothing in this repo may
+# assume "mobile is id 1":
+#   * train.py reads nc/names from this file only to REPORT them (preflight)
+#   * export.py copies them into model_package.json in that same id order
+#   * deploy/edge_client.py resolves 'mobile' BY NAME through that list
+# Reorder or rename the labels in CVAT and the whole chain still works.
+#
+# Labels resolve the standard YOLOv5 way: each image path's images/ segment is
+# replaced by labels/ and .txt appended (one YOLO-format line per box), e.g.
+#   .../versions/<id>/images/frame_00042.jpg
+#   .../versions/<id>/labels/frame_00042.txt
+#     0 0.512 0.604 0.180 0.712     <- person
+#     1 0.556 0.489 0.031 0.058     <- mobile (note how SMALL a phone box is)
+#
+# A frame with a person but no visible phone still gets a label file - just
+# the person line. A frame with neither is a legitimate background image and
+# gets an EMPTY .txt (not a missing one).

@@ -1,146 +1,193 @@
-# People Count — Store Entry / Exit Counter
+# Mobile-in-frame detection — TrainX training repository
 
-Counts people **entering** and **exiting** a store from an RTSP camera (or a
-video file) using **YOLOv8** detection, **ByteTrack** tracking and a virtual
-tripwire line drawn across the doorway.
+Detects whether a **mobile phone** is present in a frame. Two CVAT labels:
+`person`, `mobile`.
 
-```
-camera ──► YOLOv8 (person boxes) ──► ByteTrack (stable IDs) ──► line crossing ──► ENTRY / EXIT
-                                                                     │
-                                                         outputs/events/*.csv
-```
+Based on the TrainX model-repository skeleton
+(`GET /api/orchestrator/meta/model-repo-skeleton.zip`).
+Author of the skeleton: Sathish (sathish.c@magellanic-cloud.com) — Magellanic Cloud, TrainX
 
-## Repository layout
+This repo is the **code half** of a TrainX pipeline. It only trains and
+exports. Dataset resolution, MLflow logging, DVC/MinIO publishing and lineage
+commit-back are all done **for** it by the orchestrator.
 
-```
-people-count/
-├── configs/
-│   ├── config.yaml          all settings (camera, model, counting, display)
-│   └── bytetrack.yaml       tracker settings
-├── src/people_count/
-│   ├── __init__.py          sets FFmpeg RTSP-over-TCP (must run before cv2 loads)
-│   ├── config.py            loads config.yaml + credentials from .env
-│   ├── camera.py            stream reading (threaded for live, sequential for files)
-│   ├── detector.py          YOLOv8 detection + ByteTrack tracking
-│   ├── counting_line.py     tripwire geometry, dead zone, save/load per camera
-│   ├── counter.py           entry/exit state machine
-│   ├── events.py            daily CSV log of every crossing
-│   ├── line_setup.py        click-and-drag screen to draw the line
-│   ├── source_prompt.py     "which camera?" prompt
-│   ├── drawing.py           boxes, trails, HUD
-│   └── app.py               main loop + one pipeline class per mode
-├── scripts/
-│   └── run_counter.py       ← the entry point
-├── tests/                   pytest suite (no camera or model needed)
-├── weights/                 yolov8n.pt is downloaded here on first run
-├── outputs/
-│   ├── lines/               saved counting line per camera
-│   └── events/              CSV of entries / exits per camera per day
-├── .env.example             copy to .env and add the camera password
-├── requirements.txt
-└── pyproject.toml
-```
+---
 
-## Setup
+## Use it
 
-```bash
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env               # then put the camera username/password in .env
-```
+1. `git init && git add . && git commit -m "mobile-in-frame detection training repo"`
+2. Push to your git remote (Azure DevOps / GitHub / GitLab).
+3. Paste the repo URL into the New Pipeline wizard's **Repository** step
+   (*Check & Continue* runs a real `git ls-remote`).
+4. The repo is cloned at the **first training run**, not at wizard time. The
+   stage log names the exact commit trained on.
 
-Set the camera host and stream path in `configs/config.yaml`. The password goes
-only in `.env`, which is git-ignored and never pushed.
+Nothing else needs editing before the first run. `train.py` and `export.py`
+are complete and were verified end-to-end (train → `results.csv` →
+`weights/best.pt` → `best.onnx` → `model_package.json` → edge inference).
 
-## Run
+---
 
-```bash
-python scripts/run_counter.py                       # asks which camera, then counts
-python scripts/run_counter.py --mode view           # test the camera only (no model)
-python scripts/run_counter.py --redraw-line         # draw a new door line
-python scripts/run_counter.py --source sample.mp4   # run on a recording
-python scripts/run_counter.py --headless --no-prompt  # server: no window, CSV only
-python scripts/run_counter.py --help                # all options
-```
+## Wizard settings for this project
 
-| Mode | What it does |
-|---|---|
-| `count` (default) | Draw a line, then count ENTRY / EXIT |
-| `view` | Video only, no model. Quickest camera test |
-| `detect` | Person boxes, no IDs |
-| `track` | Boxes + stable IDs, no counting |
+| Field | Use | Why |
+| --- | --- | --- |
+| **Image size** | **640** | A phone is a *small object* — often under 5% of frame height. At 320 it is a handful of pixels after downsampling and recall collapses. `train.py` prints a warning if you pass anything below 640. |
+| **Epochs** | **100–150** | The skeleton default of 2 is a smoke test, not training. |
+| **Batch size** | 8–16 | 8 is safe at 640 on a modest GPU; raise it if memory allows. |
+| **Weights variant** | **`yolov5s`** for the first run | Zero extra dependencies — it delegates to the shared `$YOLOV5_ROOT` checkout, which the training venv already provides. `yolov5n` is faster but weakest on small objects. |
+| | `yolo11s` / `yolov8s` as an upgrade | Usually better on small objects, **but** requires `pip install ultralytics` on the *shared* training venv — coordinate with the MLOps engineer **before** the run, or it fails immediately with that exact message. |
+| **Seed** | 0 | Forwarded verbatim and logged to MLflow. |
 
-Window keys: `q`/Esc quit, `t` toggle trails, `r` reset counts.
+Both weight families work — `train.py` dispatches on the `--weights`
+basename, and a warm-start `best.pt` is identified by reading the checkpoint
+itself.
 
-## Drawing the door line
+---
 
-On the first run you draw the line on live video:
+## The class list is NOT in this repo
 
-| Key | Action |
-|---|---|
-| click and drag | draw the line across the doorway |
-| `f` | flip which side is ENTRY (watch the green arrow) |
-| `r` | clear and redraw |
-| Enter / `c` | confirm |
-| `q` / Esc | cancel |
+`nc` and `names` are regenerated from the project's **CVAT label list on every
+run** and reach `train.py` only through the generated `--data` yaml. So the id
+of `mobile` is whatever position CVAT gives it, and it can change. Nothing
+here hardcodes it:
 
-**Make sure the green ENTRY arrow points into the store.** If it does not,
-press `f`. The line is saved per camera in `outputs/lines/` and reused on later
-runs.
+* `train.py` reads `nc`/`names` only to **report** them (see the preflight below)
+* `export.py` copies them into `model_package.json` **in that same id order**
+* `deploy/edge_client.py` resolves `mobile` **by name** through that list
 
-## Output: entry / exit log
+Rename the label to `Cell Phone` or reorder it in CVAT and the whole chain
+still works. See `dataset.yaml.example`.
 
-Every crossing is written to `outputs/events/<camera>_<YYYY-MM-DD>.csv`:
+---
+
+## The dataset preflight
+
+Before epoch 1, `train.py` prints exactly what the run is about to train on
+and warns about the three things that quietly ruin a two-class person/mobile
+run:
 
 ```
-timestamp,camera,track_id,direction,entry_total,exit_total,inside
-2026-10-08T10:15:02,172-20-100-138-554-cam-realmonitor-channel-1-subtype-1,12,entry,1,0,1
-2026-10-08T10:15:40,172-20-100-138-554-cam-realmonitor-channel-1-subtype-1,15,exit,1,1,0
+[train.py] ---- dataset preflight -------------------------------------------
+[train.py] classes   : nc=2 names=['person', 'mobile']
+[train.py] train     : 4820 images  (from /trainx/workspaces/.../train_split.txt)
+[train.py] val       : 1204 images  (from /trainx/workspaces/.../val_split.txt)
+[train.py] box tally : person=9871  mobile=1432
+[train.py] label files: 4820 read, 0 missing, 118 empty (background), 0 malformed
+[train.py] ------------------------------------------------------------------
 ```
 
-`inside` = entries − exits. It assumes the store was empty when counting
-started, so press `r` to reset when it is.
+It **warns, never fails** — the yaml is generated by the pipeline, so a false
+positive here must not block a run:
 
-## How counting avoids false counts
+| Warning | What it actually means |
+| --- | --- |
+| `class 'mobile' (id 1) has ZERO boxes in the train split` | The CVAT label exists but nobody drew the boxes yet. **This is the failure to watch for.** The run finishes and reports a healthy-looking mAP — because `person` carries it — while the model can never detect a phone. |
+| `N image(s) ... have NO label .txt next to them` | The `images/` → `labels/` rewrite did not resolve. Those images train as pure background. |
+| `label files contain class id(s) [5] but nc=2` | Annotations and the CVAT label list are out of sync. |
+| `the generated yaml says nc=3` | A third label crept into the CVAT list. |
 
-1. **Signed distance.** For each person's foot point, the cross product with
-   the line gives which side they are on and how far away they are, in pixels.
-2. **Dead zone (`dead_zone_px`).** A band around the line where the side is not
-   updated. Someone standing on the threshold jitters across the line but is
-   never counted. They must clear the band on the far side. In synthetic tests,
-   300 frames of ±8 px jitter on the line give **0** counts with the dead zone
-   and over 50 without it.
-3. **Segment bound.** Crossings beyond the ends of the drawn line are ignored,
-   so people walking past the door are not counted.
-4. **Foot point, not box centre.** This matches where the person actually stands.
-5. **Minimum track age.** A brand-new ID cannot count, which blocks counts from
-   flicker and re-issued IDs.
+`TRAINX_SKIP_PREFLIGHT=1` skips the scan. It samples at most 10,000 label
+files, which is plenty to tell "mobile has no boxes" from "mobile is rarer
+than person".
 
-## Tuning (`configs/config.yaml`)
+After training, the four numbers the human acceptance gate reads are echoed
+straight into the stage log:
 
-| Setting | Default | Notes |
-|---|---|---|
-| `model.inference_size` | 480 | 320 = faster, 640 = more accurate |
-| `model.track_conf_threshold` | 0.15 | Keep low: ByteTrack recovers occluded people from weak detections |
-| `counting.dead_zone_px` | 12 | Tuned for 640×480; increase for 1080p |
-| `counting.min_track_age_frames` | 3 | |
-| `bytetrack.yaml: track_buffer` | 30 | Increase if people get new IDs after occlusion (double counts) |
-
-Prefer the camera **sub-stream** (Dahua `subtype=1`, Hikvision `/Streaming/Channels/102`).
-
-## Tests
-
-```bash
-pip install -r requirements-dev.txt
-pytest -q
+```
+[train.py] acceptance-gate metrics (last row): precision=0.887  recall=0.741  mAP_0.5=0.812  mAP_0.5:0.95=0.503
 ```
 
-These cover clean entries and exits, loitering with jitter, hesitating and
-turning back, crossings off the line ends, new-track guard, two people at
-once, CSV logging, and password-safe URLs.
+---
 
-## Credits
+## Reading the results for THIS project
 
-Counting logic is adapted from
-[sravanjaggarapu-MCL/peopleCount](https://github.com/sravanjaggarapu-MCL/peopleCount).
+Overall mAP is **flattered by `person`**. A person is large, common and easy;
+a phone is small, rare and hard. Always open the per-class rows before
+approving at the Model Acceptance Gate — an overall mAP\@0.5 of 0.80 can hide
+`mobile` sitting at 0.35.
+
+The metric that matters is **`mobile` recall**: a missed phone is the failure
+mode this project exists to prevent. If `mobile` recall is weak:
+
+* raise **Image size** to 640 (or 960) before anything else — it is by far the
+  biggest lever on small objects;
+* add training frames where the phone is small, partially occluded by a hand,
+  held at ear height, face-down on a desk, or backlit;
+* add **hard negatives** — hands holding wallets, ID cards, badges, remote
+  controls, water bottles. Without them, anything hand-sized becomes a phone;
+* keep annotating phones **tightly** — a loose box around hand+phone teaches
+  the model to find hands.
+
+---
+
+## Repo layout
+
+| Path | Purpose |
+| --- | --- |
+| `train.py` | **Required.** Training entry point at the repo root. Accepts the orchestrator's exact argv, dispatches on the `--weights` family, runs the dataset preflight, writes `results.csv` + `weights/best.pt`. |
+| `export.py` | **Required.** Post-training export. Sniffs the family from the trained checkpoint, writes `best.onnx` next to the weights, plus a `model_package.json` when one is not already there. |
+| `detect.py` | Inference entry point. The evaluation stage's `eval_visual_sample.py` looks for it here to render the annotated "what did the model actually find?" sample; without it that stage logs `detect.py not found` and the run has numbers but no picture. |
+| `requirements.txt` | Dependencies per architecture family. **Not** pip-installed automatically — the training venv is shared. |
+| `dataset.yaml.example` | Reference copy of the per-run generated dataset config. Never ship a live `dataset.yaml`. |
+| `deploy/edge_client.py` | Runnable edge client: RTSP/file → ONNX → *"is there a phone in frame?"* → your action hook. |
+| `deploy/README.md` | Install + systemd steps for shipping this model to a device. |
+| `.gitignore` | Keeps weights/exports/runs out of git — binaries are versioned by DVC in MinIO (house rule). |
+
+---
+
+## The platform contract (unchanged from the skeleton)
+
+**Invocation** — `<project-venv>/bin/python <repo-clone>/train.py` with:
+`--img`, `--batch`, `--epochs`, `--data`, `--weights`, `--project`, `--name`,
+`--seed`, `--exist-ok`. Never rename or drop one of these flags; the
+orchestrator passes every one.
+
+**Required outputs** in `<--project>/<--name>/`:
+
+* `results.csv` — per-epoch metrics in **YOLOv5 column names**. The last row's
+  `metrics/precision`, `metrics/recall`, `metrics/mAP_0.5`,
+  `metrics/mAP_0.5:0.95` feed the acceptance gate. The ultralytics path
+  rewrites its native `(B)`-suffixed columns into these automatically.
+* `weights/best.pt` — the trained checkpoint. Exported, quantized,
+  regression-tested, published via DVC to MinIO, and offered as the warm-start
+  source for later runs.
+* `weights/last.pt` — optional, not read by the pipeline.
+
+**Export stage** runs
+`python export.py --weights <best.pt> --img <size> --include onnx --data <yaml>`
+and fails unless `best.onnx` appears next to the weights. `--include
+openvino` / `tflite` may follow and are best-effort.
+
+**Architecture dispatch** — `yolov5*` re-execs `$YOLOV5_ROOT/train.py`
+(default `/home/ivis/projects/Human-Detection/code`, exported by the training
+host); `yolov8*`/`yolo11*`/`yolo26*` train natively via `ultralytics`.
+
+**Dataset** — CVAT annotations exported as "YOLO 1.1", promoted into an
+approved immutable dataset version under
+`/trainx/datasets/<project_id>/master/versions/<dataset_id>/`. The pipeline
+writes the split lists and points the generated yaml at them.
+
+**MLflow** — logged **for** the run by `log_run_to_mlflow.py` after `train.py`
+exits. This repo needs no MLflow code of its own; it only has to produce
+`results.csv` and `weights/best.pt`.
+
+**MinIO / DVC** — weights and datasets are **never** committed to git; git
+holds code and `.dvc` pointers only.
+
+---
+
+## Troubleshooting
+
+| Stage log says | Fix |
+| --- | --- |
+| `needs the 'ultralytics' package, which is not importable` | You picked a `yolov8`/`yolo11`/`yolo26` variant. Ask the MLOps engineer to `pip install ultralytics` on the shared training venv, or switch to `yolov5s`. |
+| `yolov5 weights delegate training to the shared YOLOv5 checkout, but .../train.py does not exist` | `YOLOV5_ROOT` is unset or wrong on the host. The training host normally exports it. |
+| `class 'mobile' (id 1) has ZERO boxes in the train split` | Draw and approve the phone boxes in CVAT, promote a new dataset version, rerun. |
+| `cannot determine the model family from --weights` | The variant is neither `yolov5*` nor `yolov8*`/`yolo11*`/`yolo26*`, and a warm-start checkpoint did not identify itself. Pick a supported variant. |
+| Good overall mAP, terrible phone detection in the field | Read the per-class rows, then raise Image size to 640 and add hard negatives. See *Reading the results* above. |
+| `best.pt appears to be an Ultralytics YOLOv5 model ... NOT forwards compatible with YOLOv8` in the export stage | The family sniff misread a YOLOv5 checkpoint as an ultralytics one. A YOLOv5 `best.pt` trained from a git clone pickles the remote URL `github.com/ultralytics/yolov5`, so the bare substring `ultralytics` is present in YOLOv5 checkpoints too. Fixed here by testing `models.yolo` **first**; if you see this again, the repo the pipeline cloned is older than this commit. |
+| No `[train.py] ---- dataset preflight` block in the stage log | The pipeline cloned a commit **without** this code. Check the wizard's Repository URL and that your work is pushed to *that* repo, then rerun with 'use latest code'. |
+| `N/1000 train images (91%) contain NO boxes at all` | An autolabel export where the auto-labeller found objects in very few frames. Review and correct it in CVAT and re-promote — no epoch count or learning rate fixes a dataset with ~100 annotated images. |
+| `images appear in BOTH the train and val splits` | The dataset version has no persisted split, so mAP is being measured on training data and means nothing. Re-promote the dataset version (any mode) to get a real leakage-free split. |
+| `_ARRAY_API not found` / `compiled using NumPy 1.x cannot be run in NumPy 2.x` | Environment, not repo: the training venv has numpy 2.x while pandas/pyarrow were built against 1.x. Non-fatal (training and MLflow logging still complete) — hand it to the MLOps engineer to pin `numpy<2` or rebuild those wheels. |

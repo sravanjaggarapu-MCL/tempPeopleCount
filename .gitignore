@@ -1,30 +1,17 @@
-# Secrets - camera passwords
-.env
-cameras.json
-
-# Model weights (downloaded automatically)
-weights/*.pt
+# Author: Sathish (sathish.c@magellanic-cloud.com) — Magellanic Cloud, TrainX
+#
+# TrainX house rule: weights and datasets are NEVER committed to git.
+# Binaries are versioned by DVC in MinIO; git holds code and .dvc pointers.
 *.pt
-
-# Run outputs
-outputs/events/*
-outputs/lines/*
-!outputs/events/.gitkeep
-!outputs/lines/.gitkeep
-counting_line.json*
+*.pth
+*.onnx
+*.tflite
+*_openvino_model/
 runs/
-
-# Video files
-*.mp4
-*.avi
-*.mkv
-
-# Python
+datasets/
+mlruns/
 __pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
+*.pyc
 .venv/
 venv/
-.idea/
-.vscode/
+.DS_Store
