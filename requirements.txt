@@ -1,0 +1,7 @@
+# pip install -r requirements.txt
+# ultralytics pulls in torch. For a GPU machine install the CUDA build of
+# torch first from https://pytorch.org, then this file.
+ultralytics>=8.3.0
+opencv-python>=4.8.0
+numpy>=1.24
+PyYAML>=6.0

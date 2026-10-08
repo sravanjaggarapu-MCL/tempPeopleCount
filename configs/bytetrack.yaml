@@ -1,0 +1,10 @@
+# ByteTrack settings (Ultralytics format).
+# If people disappear behind a pillar and come back with a NEW ID
+# (= double counts), raise track_buffer.
+tracker_type: bytetrack
+track_high_thresh: 0.25   # round 1: match tracks to confident detections
+track_low_thresh: 0.1     # round 2: recover weak / occluded detections
+new_track_thresh: 0.25    # confidence needed to start a new track
+track_buffer: 30          # frames a lost track is kept alive
+match_thresh: 0.8
+fuse_score: True

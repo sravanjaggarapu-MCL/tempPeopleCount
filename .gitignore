@@ -1,0 +1,30 @@
+# Secrets - camera passwords
+.env
+cameras.json
+
+# Model weights (downloaded automatically)
+weights/*.pt
+*.pt
+
+# Run outputs
+outputs/events/*
+outputs/lines/*
+!outputs/events/.gitkeep
+!outputs/lines/.gitkeep
+counting_line.json*
+runs/
+
+# Video files
+*.mp4
+*.avi
+*.mkv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+.idea/
+.vscode/
